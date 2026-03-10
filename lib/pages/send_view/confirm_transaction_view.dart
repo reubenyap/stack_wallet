@@ -37,10 +37,13 @@ import '../../wallets/crypto_currency/coins/ethereum.dart';
 import '../../wallets/crypto_currency/coins/mimblewimblecoin.dart';
 import '../../wallets/crypto_currency/intermediate/nano_currency.dart';
 import '../../wallets/isar/providers/eth/current_token_wallet_provider.dart';
+import '../../wallets/isar/providers/solana/current_sol_token_wallet_provider.dart';
 import '../../wallets/isar/providers/wallet_info_provider.dart';
 import '../../wallets/models/tx_data.dart';
+import '../../wallets/wallet/impl/epiccash_wallet.dart';
 import '../../wallets/wallet/impl/firo_wallet.dart';
 import '../../wallets/wallet/impl/mimblewimblecoin_wallet.dart';
+import '../../wallets/wallet/impl/solana_wallet.dart';
 import '../../wallets/wallet/wallet_mixin_interfaces/paynym_interface.dart';
 import '../../widgets/background.dart';
 import '../../widgets/conditional_parent.dart';
@@ -57,6 +60,7 @@ import '../../widgets/textfield_icon_button.dart';
 import '../../wl_gen/interfaces/libepiccash_interface.dart';
 import '../pinpad_views/lock_screen_view.dart';
 import '../wallet_view/wallet_view.dart';
+import 'sub_widgets/epic_slatepack_dialog.dart';
 import 'sub_widgets/mwc_slatepack_dialog.dart';
 import 'sub_widgets/sending_transaction_dialog.dart';
 
@@ -185,6 +189,85 @@ class _ConfirmTransactionViewState
     }
   }
 
+  /// Handle Epic Cash slate creation for manual exchange.
+  Future<void> _handleEpicSlatepackCreation(
+    BuildContext context,
+    EpiccashWallet wallet,
+  ) async {
+    try {
+      // Close the progress dialog first.
+      Navigator.of(context).pop();
+
+      // Get recipient information from txData.
+      final recipient = widget.txData.recipients?.first;
+      if (recipient == null) {
+        throw Exception('No recipient found in transaction data');
+      }
+
+      // Create slatepack.
+      final slatepackResult = await wallet.createSlatepack(
+        amount: recipient.amount,
+        recipientAddress: recipient.address.isNotEmpty
+            ? recipient.address
+            : null,
+        message: onChainNoteController.text.isNotEmpty
+            ? onChainNoteController.text
+            : null,
+      );
+
+      if (!slatepackResult.success || slatepackResult.slatepack == null) {
+        throw Exception(slatepackResult.error ?? 'Failed to create slate');
+      }
+
+      // Show slatepack dialog.
+      if (context.mounted) {
+        await showDialog<void>(
+          context: context,
+          barrierDismissible: false,
+          builder: (context) =>
+              EpicSlatepackDialog(slatepackResult: slatepackResult),
+        );
+
+        // After slatepack dialog is closed, navigate back to wallet.
+        if (context.mounted) {
+          widget.onSuccess.call();
+          if (widget.onSuccessInsteadOfRouteOnSuccess == null) {
+            Navigator.of(
+              context,
+            ).popUntil(ModalRoute.withName(routeOnSuccessName));
+          } else {
+            widget.onSuccessInsteadOfRouteOnSuccess!.call();
+          }
+        }
+      }
+    } catch (e, s) {
+      Logging.instance.e('Failed to create Epic Cash slate: $e\n$s');
+
+      if (context.mounted) {
+        // Show user-friendly error message.
+        final errorMessage = e.toString().contains('insufficient funds')
+            ? 'Insufficient funds for this transaction'
+            : e.toString().contains('wallet not open')
+            ? 'Wallet not accessible. Please restart the app.'
+            : 'Failed to create slate: ${e.toString()}';
+
+        await showDialog<void>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Slate Creation Failed'),
+            content: Text('Failed to create slate: $e'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
+        );
+      }
+    }
+  }
+
   Future<void> _attemptSend(BuildContext context) async {
     final wallet = ref.read(pWallets).getWallet(walletId);
     final coin = wallet.info.coin;
@@ -214,9 +297,17 @@ class _ConfirmTransactionViewState
 
     try {
       if (widget.isTokenTx) {
-        txDataFuture = ref
-            .read(pCurrentTokenWallet)!
-            .confirmSend(txData: widget.txData);
+        if (wallet is SolanaWallet) {
+          // For Solana tokens, use the Solana token wallet.
+          txDataFuture = ref
+              .read(pCurrentSolanaTokenWallet)!
+              .confirmSend(txData: widget.txData);
+        } else {
+          // For Ethereum tokens, use the Ethereum token wallet.
+          txDataFuture = ref
+              .read(pCurrentTokenWallet)!
+              .confirmSend(txData: widget.txData);
+        }
       } else if (widget.isPaynymNotificationTransaction) {
         txDataFuture = (wallet as PaynymInterface).broadcastNotificationTx(
           txData: widget.txData,
@@ -265,11 +356,28 @@ class _ConfirmTransactionViewState
               );
             }
           } else if (coin is Epiccash) {
-            txDataFuture = wallet.confirmSend(
-              txData: widget.txData.copyWith(
-                noteOnChain: onChainNoteController.text,
-              ),
-            );
+            // Check if this is a slatepack transaction (manual exchange).
+            final epicOtherDataMap = widget.txData.otherData != null
+                ? jsonDecode(widget.txData.otherData!)
+                : null;
+            final epicTransactionMethod =
+                epicOtherDataMap?['transactionMethod'] as String?;
+
+            if (epicTransactionMethod == 'slatepack') {
+              // Handle slatepack creation instead of direct send.
+              await _handleEpicSlatepackCreation(
+                context,
+                wallet as EpiccashWallet,
+              );
+              return; // Exit early, don't continue with normal transaction flow.
+            } else {
+              // Handle Epicbox transactions normally.
+              txDataFuture = wallet.confirmSend(
+                txData: widget.txData.copyWith(
+                  noteOnChain: onChainNoteController.text,
+                ),
+              );
+            }
           } else {
             txDataFuture = wallet.confirmSend(txData: widget.txData);
           }
@@ -301,7 +409,11 @@ class _ConfirmTransactionViewState
       }
 
       if (widget.isTokenTx) {
-        unawaited(ref.read(pCurrentTokenWallet)!.refresh());
+        if (wallet is SolanaWallet) {
+          unawaited(ref.read(pCurrentSolanaTokenWallet)!.refresh());
+        } else {
+          unawaited(ref.read(pCurrentTokenWallet)!.refresh());
+        }
       } else {
         unawaited(wallet.refresh());
       }
@@ -439,18 +551,25 @@ class _ConfirmTransactionViewState
     final coin = ref.watch(pWalletCoin(walletId));
 
     final String unit;
+    final wallet = ref.watch(pWallets).getWallet(walletId);
     if (widget.isTokenTx) {
-      unit = ref.watch(
-        pCurrentTokenWallet.select((value) => value!.tokenContract.symbol),
-      );
+      if (wallet is SolanaWallet) {
+        // For Solana tokens, use the Solana token wallet provider or TxData as fallback.
+        unit = ref.watch(
+          pCurrentSolanaTokenWallet.select((value) => value!.tokenSymbol),
+        );
+      } else {
+        // For Ethereum tokens, use the Ethereum token wallet provider.
+        unit = ref.watch(
+          pCurrentTokenWallet.select((value) => value!.tokenContract.symbol),
+        );
+      }
     } else {
       unit = coin.ticker;
     }
 
     final Amount? fee;
     final Amount amountWithoutChange;
-
-    final wallet = ref.watch(pWallets).getWallet(walletId);
 
     if (wallet is FiroWallet) {
       switch (ref.read(publicPrivateBalanceStateProvider.state).state) {
@@ -604,10 +723,15 @@ class _ConfirmTransactionViewState
                               .watch(pAmountFormatter(coin))
                               .format(
                                 amountWithoutChange,
-                                ethContract: widget.isTokenTx
+                                tokenContract:
+                                    widget.isTokenTx && wallet is! SolanaWallet
                                     ? ref
                                           .watch(pCurrentTokenWallet)!
                                           .tokenContract
+                                    : widget.isTokenTx && wallet is SolanaWallet
+                                    ? ref
+                                          .watch(pCurrentSolanaTokenWallet)!
+                                          .solContract
                                     : null,
                               ),
                           style: STextStyles.itemSubtitle12(context),
@@ -794,17 +918,34 @@ class _ConfirmTransactionViewState
 
                                 if (externalCalls) {
                                   final price = widget.isTokenTx
-                                      ? ref
-                                            .read(
-                                              priceAnd24hChangeNotifierProvider,
-                                            )
-                                            .getTokenPrice(
+                                      ? (wallet is SolanaWallet
+                                            ? // For Solana tokens, use tokenMint from provider or TxData.
                                               ref
-                                                  .read(pCurrentTokenWallet)!
-                                                  .tokenContract
-                                                  .address,
-                                            )
-                                            ?.value
+                                                  .read(
+                                                    priceAnd24hChangeNotifierProvider,
+                                                  )
+                                                  .getTokenPrice(
+                                                    ref
+                                                        .read(
+                                                          pCurrentSolanaTokenWallet,
+                                                        )!
+                                                        .tokenMint,
+                                                  )
+                                                  ?.value
+                                            : // For Ethereum tokens, use contract address.
+                                              ref
+                                                  .read(
+                                                    priceAnd24hChangeNotifierProvider,
+                                                  )
+                                                  .getTokenPrice(
+                                                    ref
+                                                        .read(
+                                                          pCurrentTokenWallet,
+                                                        )!
+                                                        .tokenContract
+                                                        .address,
+                                                  )
+                                                  ?.value)
                                       : ref
                                             .read(
                                               priceAnd24hChangeNotifierProvider,
@@ -832,12 +973,21 @@ class _ConfirmTransactionViewState
                                           .watch(pAmountFormatter(coin))
                                           .format(
                                             amountWithoutChange,
-                                            ethContract: widget.isTokenTx
+                                            tokenContract:
+                                                widget.isTokenTx &&
+                                                    wallet is! SolanaWallet
                                                 ? ref
                                                       .watch(
                                                         pCurrentTokenWallet,
                                                       )!
                                                       .tokenContract
+                                                : widget.isTokenTx &&
+                                                      wallet is SolanaWallet
+                                                ? ref
+                                                      .watch(
+                                                        pCurrentSolanaTokenWallet,
+                                                      )!
+                                                      .solContract
                                                 : null,
                                           ),
                                       style:
@@ -1031,7 +1181,7 @@ class _ConfirmTransactionViewState
                   children: [
                     if (coin is Epiccash || coin is Mimblewimblecoin)
                       Text(
-                        "On chain Note (optional)",
+                        "On chain Note",
                         style: STextStyles.smallMed12(context),
                         textAlign: TextAlign.left,
                       ),

@@ -20,11 +20,13 @@ import 'package:flutter_svg/svg.dart';
 import '../../../../app_config.dart';
 import '../../../../models/keys/view_only_wallet_data.dart';
 import '../../../../notifications/show_flush_bar.dart';
+import '../../../../pages/masternodes/masternodes_home_view.dart';
 import '../../../../pages/monkey/monkey_view.dart';
 import '../../../../pages/namecoin_names/namecoin_names_home_view.dart';
 import '../../../../pages/paynym/paynym_claim_view.dart';
 import '../../../../pages/paynym/paynym_home_view.dart';
 import '../../../../pages/salvium_stake/salvium_create_stake_view.dart';
+import '../../../../pages/signing/signing_view.dart';
 import '../../../../pages/spark_names/spark_names_home_view.dart';
 import '../../../../providers/desktop/current_desktop_menu_item.dart';
 import '../../../../providers/global/paynym_api_provider.dart';
@@ -39,9 +41,10 @@ import '../../../../utilities/logger.dart';
 import '../../../../utilities/text_styles.dart';
 import '../../../../wallets/crypto_currency/coins/banano.dart';
 import '../../../../wallets/crypto_currency/coins/firo.dart';
+import '../../../../wallets/wallet/impl/bitcoin_wallet.dart';
 import '../../../../wallets/wallet/impl/firo_wallet.dart';
 import '../../../../wallets/wallet/impl/namecoin_wallet.dart';
-import '../../../../wallets/wallet/intermediate/lib_monero_wallet.dart';
+import '../../../../wallets/wallet/intermediate/cryptonote_wallet.dart';
 import '../../../../wallets/wallet/intermediate/lib_salvium_wallet.dart';
 import '../../../../wallets/wallet/wallet.dart' show Wallet;
 import '../../../../wallets/wallet/wallet_mixin_interfaces/cash_fusion_interface.dart';
@@ -51,6 +54,7 @@ import '../../../../wallets/wallet/wallet_mixin_interfaces/mweb_interface.dart';
 import '../../../../wallets/wallet/wallet_mixin_interfaces/ordinals_interface.dart';
 import '../../../../wallets/wallet/wallet_mixin_interfaces/paynym_interface.dart';
 import '../../../../wallets/wallet/wallet_mixin_interfaces/rbf_interface.dart';
+import '../../../../wallets/wallet/wallet_mixin_interfaces/sign_verify_interface.dart';
 import '../../../../wallets/wallet/wallet_mixin_interfaces/spark_interface.dart';
 import '../../../../wallets/wallet/wallet_mixin_interfaces/view_only_option_interface.dart';
 import '../../../../widgets/custom_loading_overlay.dart';
@@ -88,12 +92,15 @@ enum WalletFeature {
   namecoinName("Domains", "Namecoin DNS"),
   sparkNames("Names", "Spark names"),
   salviumStaking("Staking", "Staking"),
+  sign("Sign/Verify", "Sign / Verify messages"),
+  masternodes("Masternodes", "Manage masternodes"),
 
   // special cases
   clearSparkCache("", ""),
   rbf("", ""),
   reuseAddress("", ""),
-  enableMweb("", "");
+  enableMweb("", ""),
+  enableLegacyAddresses("", "");
 
   final String label;
   final String description;
@@ -417,6 +424,44 @@ class _DesktopWalletFeaturesState extends ConsumerState<DesktopWalletFeatures> {
     );
   }
 
+  Future<void> _onSignPressed() async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => DesktopDialog(
+        maxWidth: 580,
+        maxHeight: double.infinity,
+        child: Column(
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(left: 32),
+                  child: Text(
+                    "Sign/Verify",
+                    style: STextStyles.desktopH3(context),
+                  ),
+                ),
+                const DesktopDialogCloseButton(),
+              ],
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 32),
+              child: SigningView(walletId: widget.walletId),
+            ),
+            const SizedBox(height: 32),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _onMasternodesPressed() {
+    Navigator.of(
+      context,
+    ).pushNamed(MasternodesHomeView.routeName, arguments: widget.walletId);
+  }
+
   List<(WalletFeature, String, FutureOr<void> Function())> _getOptions(
     Wallet wallet,
     bool showExchange,
@@ -425,6 +470,7 @@ class _DesktopWalletFeaturesState extends ConsumerState<DesktopWalletFeatures> {
   ) {
     final coin = wallet.info.coin;
     final isViewOnly = wallet is ViewOnlyOptionInterface && wallet.isViewOnly;
+    final isSparkViewOnly = isViewOnly && wallet.viewOnlyType == .spark;
 
     return [
       if (!isViewOnly &&
@@ -436,7 +482,7 @@ class _DesktopWalletFeaturesState extends ConsumerState<DesktopWalletFeatures> {
           _onAnonymizeAllPressed,
         ),
 
-      if (wallet is SparkInterface)
+      if (wallet is SparkInterface && !isViewOnly || isSparkViewOnly)
         (WalletFeature.sparkNames, Assets.svg.robotHead, _onSparkNamesPressed),
 
       if (!isViewOnly &&
@@ -454,6 +500,12 @@ class _DesktopWalletFeaturesState extends ConsumerState<DesktopWalletFeatures> {
           Assets.svg.recycle,
           _onSalviumStakePressed,
         ),
+
+      if (wallet is SignVerifyInterface && !isViewOnly)
+        (WalletFeature.sign, Assets.svg.pencil, _onSignPressed),
+
+      if (!isViewOnly && wallet is FiroWallet)
+        (WalletFeature.masternodes, Assets.svg.recycle, _onMasternodesPressed),
 
       if (showCoinControl)
         (
@@ -490,8 +542,7 @@ class _DesktopWalletFeaturesState extends ConsumerState<DesktopWalletFeatures> {
           wallet is CashFusionInterface)
         (WalletFeature.fusion, Assets.svg.cashFusion, _onFusionPressed),
 
-      if (!isViewOnly &&
-          (wallet is LibMoneroWallet || wallet is LibSalviumWallet))
+      if (!isViewOnly && (wallet is CryptonoteWallet))
         (WalletFeature.churn, Assets.svg.churn, _onChurnPressed),
 
       if (wallet is NamecoinWallet)
@@ -540,10 +591,14 @@ class _DesktopWalletFeaturesState extends ConsumerState<DesktopWalletFeatures> {
     final showMwebOption = wallet is MwebInterface && !wallet.isViewOnly;
 
     final extraOptions = [
-      if (wallet is SparkInterface && !isViewOnly)
+      if (wallet is SparkInterface &&
+          (!isViewOnly || (isViewOnly && wallet.viewOnlyType == .spark)))
         (WalletFeature.clearSparkCache, Assets.svg.key, () => ()),
 
       if (wallet is RbfInterface) (WalletFeature.rbf, Assets.svg.key, () => ()),
+
+      if (wallet is BitcoinWallet)
+        (WalletFeature.enableLegacyAddresses, Assets.svg.key, () => ()),
 
       if (canGen) (WalletFeature.reuseAddress, Assets.svg.key, () => ()),
 

@@ -16,6 +16,8 @@ abstract class AppConfig {
 
   static const emptyWalletsMessage = _emptyWalletsMessage;
 
+  static const windowsMwebdExeHash = _mwebdExeHash;
+
   static String get appDefaultDataDirName => _appDataDirName;
   static String get shortDescriptionText => _shortDescriptionText;
   static String get commitHash => _commitHash;
@@ -83,7 +85,10 @@ abstract class AppConfig {
 
     try {
       return coins.firstWhere(
-        (e) => e.identifier.toLowerCase() == name || e.prettyName == prettyName,
+        (e) =>
+            e.identifier.toLowerCase() == name ||
+            e.prettyName == prettyName ||
+            (e is Epiccash && prettyName == "Epic Private Internet Cash"),
       );
     } catch (_) {
       throw Exception("getCryptoCurrencyByPrettyName($prettyName) failed!");
