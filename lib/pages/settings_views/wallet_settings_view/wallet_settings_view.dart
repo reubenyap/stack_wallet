@@ -35,6 +35,7 @@ import '../../../utilities/show_loading.dart';
 import '../../../utilities/text_styles.dart';
 import '../../../utilities/util.dart';
 import '../../../wallets/crypto_currency/crypto_currency.dart';
+import '../../../wallets/isar/models/wallet_info.dart';
 import '../../../wallets/crypto_currency/intermediate/frost_currency.dart';
 import '../../../wallets/crypto_currency/intermediate/nano_currency.dart';
 import '../../../wallets/wallet/impl/bitcoin_frost_wallet.dart';
@@ -515,10 +516,31 @@ class _WalletSettingsViewState extends ConsumerState<WalletSettingsView> {
                             DB.instance.clearSharedTransactionCache(
                               currency: coin,
                             ),
-                            if (coin is Firo)
+                            if (coin is Firo) ...[
                               FiroCacheCoordinator.clearSharedCache(
                                 coin.network,
                               ),
+                              // Reset the block hash cache so the next sync
+                              // re-identifies all coins in the re-downloaded
+                              // anonymity set, matching recover() behavior.
+                              ref
+                                  .read(pWallets)
+                                  .getWallet(widget.walletId)
+                                  .info
+                                  .updateOtherData(
+                                    newEntries: {
+                                      WalletInfoKeys
+                                              .firoSparkCacheSetBlockHashCache:
+                                          <String, String>{},
+                                    },
+                                    isar:
+                                        ref
+                                            .read(pWallets)
+                                            .getWallet(widget.walletId)
+                                            .mainDB
+                                            .isar,
+                                  ),
+                            ],
                           ]),
                           context: context,
                           message: "Clearing cache...",
